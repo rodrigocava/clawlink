@@ -12,6 +12,7 @@ GitHub: https://github.com/rodrigocava/clawpulse
 import hashlib
 import os
 from datetime import datetime, timedelta, timezone
+from typing import List
 
 import aiosqlite
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -23,20 +24,19 @@ from slowapi.util import get_remote_address
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DATABASE_PATH = os.getenv("DATABASE_PATH", "sync.db")
-DATA_TTL_HOURS = int(os.getenv("DATA_TTL_HOURS", "48"))
-MAX_PAYLOAD_BYTES = int(os.getenv("MAX_PAYLOAD_BYTES", str(10 * 1024 * 1024)))  # 10MB default
-MAX_TOKEN_QUOTA_BYTES = int(os.getenv("MAX_TOKEN_QUOTA_BYTES", str(5 * 1024 * 1024)))   # 5MB per token
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")  # Required in production; empty = disabled (dev only)
+DATABASE_PATH        = os.getenv("DATABASE_PATH", "sync.db")
+DATA_TTL_HOURS       = int(os.getenv("DATA_TTL_HOURS", "48"))
+MAX_PAYLOAD_BYTES    = int(os.getenv("MAX_PAYLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+MAX_TOKEN_QUOTA_BYTES = int(os.getenv("MAX_TOKEN_QUOTA_BYTES", str(5 * 1024 * 1024)))  # 5 MB total per token
+CLIENT_SECRET        = os.getenv("CLIENT_SECRET", "")  # Empty = dev mode (no auth)
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# ── Rate limiting ─────────────────────────────────────────────────────────────
 
 def get_client_ip(request: Request) -> str:
     """Use CF-Connecting-IP when behind Cloudflare, fall back to remote address."""
     return request.headers.get("CF-Connecting-IP") or get_remote_address(request)
 
 limiter = Limiter(key_func=get_client_ip)
-
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -48,6 +48,8 @@ async def verify_client_secret(x_clawpulse_secret: str = Header(default="")) -> 
     if CLIENT_SECRET and x_clawpulse_secret != CLIENT_SECRET:
         raise HTTPException(status_code=401, detail="Invalid or missing client secret.")
 
+# ── App ───────────────────────────────────────────────────────────────────────
+
 app = FastAPI(
     title="ClawPulse",
     description="""
@@ -56,8 +58,8 @@ Encrypted data relay for the **ClawPulse** mobile app (iOS & Android).
 ## How it works
 
 1. The ClawPulse app encrypts your phone context data client-side
-2. The encrypted blob is uploaded here (server never sees plaintext)
-3. Your OpenClaw instance fetches the blob and decrypts it locally
+2. Encrypted blobs are uploaded here — the server **never sees plaintext**
+3. Your OpenClaw instance fetches all blobs and decrypts them locally
 4. Analysis and insights happen entirely on your own infrastructure
 
 ## Privacy
@@ -67,13 +69,15 @@ Even with full database access, no personal data is recoverable without your pas
 
 ## Data retention
 
-All payloads expire automatically after **48 hours**.
+Each payload expires automatically after **48 hours** (configurable via `DATA_TTL_HOURS`).
+Multiple datapoints accumulate over time — e.g. hourly sync = up to 48 datapoints.
+Expired rows are purged on every write, read, and via the `/cleanup` endpoint.
 
 ## Self-hosting
 
 The server is open source. Run your own at: https://github.com/rodrigocava/clawpulse
 """,
-    version="1.0.0",
+    version="2.0.0",
     contact={
         "name": "ClawPulse",
         "url": "https://github.com/rodrigocava/clawpulse",
@@ -93,10 +97,9 @@ app.add_middleware(
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
-
 class SyncUpload(BaseModel):
     token: str
-    payload: str  # base64-encoded encrypted blob
+    payload: str  # base64-encoded AES-256-GCM encrypted blob
 
     @field_validator("token")
     @classmethod
@@ -113,9 +116,15 @@ class SyncUpload(BaseModel):
         return v
 
 
-class SyncResponse(BaseModel):
+class Datapoint(BaseModel):
     payload: str
-    updated_at: str
+    created_at: str
+    expires_at: str
+
+
+class SyncResponse(BaseModel):
+    count: int
+    datapoints: List[Datapoint]
 
 
 class StatusResponse(BaseModel):
@@ -125,18 +134,19 @@ class StatusResponse(BaseModel):
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-
 async def get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(DATABASE_PATH)
+    db.row_factory = aiosqlite.Row
     await db.execute("""
         CREATE TABLE IF NOT EXISTS sync_data (
-            token_hash  TEXT PRIMARY KEY,
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash  TEXT NOT NULL,
             payload     TEXT NOT NULL,
             created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL,
             expires_at  TEXT NOT NULL
         )
     """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_token_hash ON sync_data(token_hash)")
     await db.commit()
     return db
 
@@ -153,27 +163,46 @@ def expiry_utc() -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=DATA_TTL_HOURS)).isoformat()
 
 
-async def purge_expired() -> None:
-    db = await aiosqlite.connect(DATABASE_PATH)
-    await db.execute("DELETE FROM sync_data WHERE expires_at < ?", (now_utc(),))
+async def purge_expired_for_token(db: aiosqlite.Connection, token_hash: str) -> None:
+    """Remove expired rows for a specific token."""
+    await db.execute(
+        "DELETE FROM sync_data WHERE token_hash = ? AND expires_at < ?",
+        (token_hash, now_utc()),
+    )
     await db.commit()
-    await db.close()
 
 
-async def check_quota(token_hash: str, new_payload: str) -> None:
-    """Enforce per-token storage quota. Raises 429 if exceeded."""
+async def purge_all_expired(db: aiosqlite.Connection) -> int:
+    """Remove all expired rows across all tokens. Returns number of rows deleted."""
+    cursor = await db.execute(
+        "DELETE FROM sync_data WHERE expires_at < ?", (now_utc(),)
+    )
+    await db.commit()
+    return cursor.rowcount
+
+
+async def check_quota(db: aiosqlite.Connection, token_hash: str, new_payload: str) -> None:
+    """Enforce per-token total storage quota across all datapoints."""
     new_size = len(new_payload.encode())
-    if new_size > MAX_TOKEN_QUOTA_BYTES:
+    if new_size > MAX_PAYLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Payload exceeds single upload size limit.")
+
+    async with db.execute(
+        "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM sync_data WHERE token_hash = ? AND expires_at > ?",
+        (token_hash, now_utc()),
+    ) as cursor:
+        row = await cursor.fetchone()
+        current_total = row[0] if row else 0
+
+    if current_total + new_size > MAX_TOKEN_QUOTA_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"Payload exceeds per-token quota of {MAX_TOKEN_QUOTA_BYTES // 1024 // 1024}MB.",
+            detail=f"Token storage quota exceeded ({MAX_TOKEN_QUOTA_BYTES // 1024 // 1024}MB total). "
+                   "Old datapoints will free up space as they expire.",
         )
-    # If a blob already exists for this token, the upload replaces it — no cumulative issue.
-    # Quota check is purely on the incoming payload size.
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
-
 
 @app.on_event("startup")
 async def startup() -> None:
@@ -182,7 +211,6 @@ async def startup() -> None:
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
-
 
 @app.post(
     "/sync",
@@ -194,96 +222,84 @@ async def startup() -> None:
 @limiter.limit("10/minute")
 async def upload_sync(request: Request, data: SyncUpload):
     """
-    Upload an encrypted payload for later retrieval by OpenClaw.
+    Upload an encrypted payload. Each upload creates a **new datapoint** — previous
+    uploads are not replaced. All datapoints for a token expire after `DATA_TTL_HOURS`.
 
-    - **token**: Your secret token (only a SHA-256 hash is stored — never the raw value)
-    - **payload**: Base64-encoded, client-side encrypted blob
-
-    Uploading again with the same token **replaces** the previous payload.
-    Data expires automatically after 48 hours.
+    - **token**: Your UUID (only its SHA-256 hash is stored)
+    - **payload**: Base64-encoded AES-256-GCM encrypted blob
     """
-    if len(data.payload.encode()) > MAX_PAYLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Payload exceeds size limit")
-
     token_hash = hash_token(data.token)
-    await check_quota(token_hash, data.payload)
-    now = now_utc()
-    exp = expiry_utc()
-
     db = await get_db()
     try:
+        await purge_expired_for_token(db, token_hash)
+        await check_quota(db, token_hash, data.payload)
         await db.execute(
-            """
-            INSERT INTO sync_data (token_hash, payload, created_at, updated_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(token_hash) DO UPDATE SET
-                payload    = excluded.payload,
-                updated_at = excluded.updated_at,
-                expires_at = excluded.expires_at
-            """,
-            (token_hash, data.payload, now, now, exp),
+            "INSERT INTO sync_data (token_hash, payload, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token_hash, data.payload, now_utc(), expiry_utc()),
         )
         await db.commit()
     finally:
         await db.close()
 
-    await purge_expired()
     return StatusResponse(status="ok", message=f"Stored. Expires in {DATA_TTL_HOURS}h.")
 
 
 @app.get(
     "/sync/{token}",
     response_model=SyncResponse,
-    summary="Fetch encrypted payload",
+    summary="Fetch all datapoints",
     tags=["Sync"],
     dependencies=[Depends(verify_client_secret)],
 )
 @limiter.limit("30/minute")
 async def fetch_sync(request: Request, token: str):
     """
-    Retrieve the latest encrypted payload for a token.
+    Retrieve all non-expired datapoints for a token, ordered oldest → newest.
 
-    Returns the blob as-is — decryption happens on your OpenClaw instance.
-    Returns **404** if no data exists or if it has expired.
+    Returns an array of encrypted blobs — decryption happens on your OpenClaw instance.
+    Returns **404** if no data exists or everything has expired.
     """
     token_hash = hash_token(token)
-
     db = await get_db()
     try:
+        await purge_expired_for_token(db, token_hash)
         async with db.execute(
-            "SELECT payload, updated_at FROM sync_data WHERE token_hash = ? AND expires_at > ?",
+            "SELECT payload, created_at, expires_at FROM sync_data "
+            "WHERE token_hash = ? AND expires_at > ? ORDER BY created_at ASC",
             (token_hash, now_utc()),
         ) as cursor:
-            row = await cursor.fetchone()
+            rows = await cursor.fetchall()
     finally:
         await db.close()
 
-    if not row:
+    if not rows:
         raise HTTPException(
             status_code=404,
-            detail="No data found for this token (may have expired or never been uploaded)",
+            detail="No data found for this token (may have expired or never been uploaded).",
         )
 
-    return SyncResponse(payload=row[0], updated_at=row[1])
+    return SyncResponse(
+        count=len(rows),
+        datapoints=[
+            Datapoint(payload=row[0], created_at=row[1], expires_at=row[2])
+            for row in rows
+        ],
+    )
 
 
 @app.delete(
     "/sync/{token}",
     response_model=StatusResponse,
-    summary="Delete payload",
+    summary="Delete all datapoints for a token",
     tags=["Sync"],
     dependencies=[Depends(verify_client_secret)],
 )
 @limiter.limit("10/minute")
 async def delete_sync(request: Request, token: str):
     """
-    Delete the payload for a token.
-
-    Call this after OpenClaw has successfully fetched and processed the data
-    to keep your storage footprint minimal.
+    Delete **all** datapoints for a token (the app's Nuke button).
     """
     token_hash = hash_token(token)
-
     db = await get_db()
     try:
         result = await db.execute(
@@ -295,9 +311,30 @@ async def delete_sync(request: Request, token: str):
         await db.close()
 
     if deleted == 0:
-        raise HTTPException(status_code=404, detail="No data found for this token")
+        raise HTTPException(status_code=404, detail="No data found for this token.")
 
-    return StatusResponse(status="ok", message="Payload deleted.")
+    return StatusResponse(status="ok", message=f"Deleted {deleted} datapoint(s).")
+
+
+@app.get(
+    "/cleanup",
+    response_model=StatusResponse,
+    summary="Purge all expired datapoints",
+    tags=["System"],
+)
+async def cleanup():
+    """
+    Purge all expired datapoints across all tokens.
+    Safe to call via cron — returns number of rows deleted.
+    No auth required (deletes only expired data, exposes nothing).
+    """
+    db = await get_db()
+    try:
+        deleted = await purge_all_expired(db)
+    finally:
+        await db.close()
+
+    return StatusResponse(status="ok", message=f"Purged {deleted} expired datapoint(s).")
 
 
 @app.get(
