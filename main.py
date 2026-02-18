@@ -14,7 +14,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -25,7 +25,9 @@ from slowapi.util import get_remote_address
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "sync.db")
 DATA_TTL_HOURS = int(os.getenv("DATA_TTL_HOURS", "48"))
-MAX_PAYLOAD_BYTES = int(os.getenv("MAX_PAYLOAD_BYTES", str(10 * 1024 * 1024)))  # 10MB
+MAX_PAYLOAD_BYTES = int(os.getenv("MAX_PAYLOAD_BYTES", str(10 * 1024 * 1024)))  # 10MB default
+MAX_TOKEN_QUOTA_BYTES = int(os.getenv("MAX_TOKEN_QUOTA_BYTES", str(5 * 1024 * 1024)))   # 5MB per token
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")  # Required in production; empty = disabled (dev only)
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -34,6 +36,17 @@ def get_client_ip(request: Request) -> str:
     return request.headers.get("CF-Connecting-IP") or get_remote_address(request)
 
 limiter = Limiter(key_func=get_client_ip)
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+async def verify_client_secret(x_clawpulse_secret: str = Header(default="")) -> None:
+    """
+    Validate the shared app secret sent by the ClawPulse mobile app.
+    Set CLIENT_SECRET env var to enable. If unset, validation is skipped (dev mode).
+    """
+    if CLIENT_SECRET and x_clawpulse_secret != CLIENT_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid or missing client secret.")
 
 app = FastAPI(
     title="ClawPulse",
@@ -147,6 +160,18 @@ async def purge_expired() -> None:
     await db.close()
 
 
+async def check_quota(token_hash: str, new_payload: str) -> None:
+    """Enforce per-token storage quota. Raises 429 if exceeded."""
+    new_size = len(new_payload.encode())
+    if new_size > MAX_TOKEN_QUOTA_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Payload exceeds per-token quota of {MAX_TOKEN_QUOTA_BYTES // 1024 // 1024}MB.",
+        )
+    # If a blob already exists for this token, the upload replaces it — no cumulative issue.
+    # Quota check is purely on the incoming payload size.
+
+
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 
@@ -164,6 +189,7 @@ async def startup() -> None:
     response_model=StatusResponse,
     summary="Upload encrypted payload",
     tags=["Sync"],
+    dependencies=[Depends(verify_client_secret)],
 )
 @limiter.limit("10/minute")
 async def upload_sync(request: Request, data: SyncUpload):
@@ -180,6 +206,7 @@ async def upload_sync(request: Request, data: SyncUpload):
         raise HTTPException(status_code=413, detail="Payload exceeds size limit")
 
     token_hash = hash_token(data.token)
+    await check_quota(token_hash, data.payload)
     now = now_utc()
     exp = expiry_utc()
 
@@ -209,6 +236,7 @@ async def upload_sync(request: Request, data: SyncUpload):
     response_model=SyncResponse,
     summary="Fetch encrypted payload",
     tags=["Sync"],
+    dependencies=[Depends(verify_client_secret)],
 )
 @limiter.limit("30/minute")
 async def fetch_sync(request: Request, token: str):
@@ -244,6 +272,7 @@ async def fetch_sync(request: Request, token: str):
     response_model=StatusResponse,
     summary="Delete payload",
     tags=["Sync"],
+    dependencies=[Depends(verify_client_secret)],
 )
 @limiter.limit("10/minute")
 async def delete_sync(request: Request, token: str):
