@@ -20,6 +20,8 @@ import aiosqlite
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+
+from apple_jws import verify_apple_jws
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -30,8 +32,11 @@ DATABASE_PATH        = os.getenv("DATABASE_PATH", "sync.db")
 DATA_TTL_HOURS       = int(os.getenv("DATA_TTL_HOURS", "48"))
 MAX_PAYLOAD_BYTES    = int(os.getenv("MAX_PAYLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
 MAX_TOKEN_QUOTA_BYTES = int(os.getenv("MAX_TOKEN_QUOTA_BYTES", str(5 * 1024 * 1024)))  # 5 MB total per token
-CLIENT_SECRET        = os.getenv("CLIENT_SECRET", "")  # Empty = dev mode (no auth)
-CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_SEC", str(60 * 60)))  # 1 hour
+CLIENT_SECRET         = os.getenv("CLIENT_SECRET", "")         # Empty = dev mode (no auth)
+CLEANUP_INTERVAL_SEC  = int(os.getenv("CLEANUP_INTERVAL_SEC", str(60 * 60)))  # 1 hour
+REQUIRE_SUBSCRIPTION  = os.getenv("REQUIRE_SUBSCRIPTION", "false").lower() == "true"
+# Set to "Sandbox" during development / TestFlight, "Production" for App Store
+APPLE_ENVIRONMENT     = os.getenv("APPLE_ENVIRONMENT", "Production")
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 
@@ -115,7 +120,7 @@ Expired rows are purged on every write, read, and via the `/cleanup` endpoint.
 
 The server is open source. Run your own at: https://github.com/rodrigocava/clawpulse
 """,
-    version="2.2.0",
+    version="2.3.0",
     contact={
         "name": "ClawPulse",
         "url": "https://github.com/rodrigocava/clawpulse",
@@ -176,6 +181,25 @@ class StatusResponse(BaseModel):
     message: str
 
 
+class ActivateRequest(BaseModel):
+    token: str           # UUID in plaintext — matched against appAccountToken in JWS
+    jws_transaction: str # StoreKit 2 signed transaction string
+
+    @field_validator("token")
+    @classmethod
+    def token_min_length(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Token must be at least 8 characters")
+        return v
+
+    @field_validator("jws_transaction")
+    @classmethod
+    def jws_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("jws_transaction cannot be empty")
+        return v
+
+
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 async def get_db() -> aiosqlite.Connection:
@@ -191,6 +215,16 @@ async def get_db() -> aiosqlite.Connection:
         )
     """)
     await db.execute("CREATE INDEX IF NOT EXISTS idx_token_hash ON sync_data(token_hash)")
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS subscribers (
+            token_hash               TEXT PRIMARY KEY,
+            active_until             TEXT NOT NULL,
+            original_transaction_id  TEXT NOT NULL UNIQUE,
+            environment              TEXT NOT NULL DEFAULT 'Production',
+            created_at               TEXT NOT NULL,
+            updated_at               TEXT NOT NULL
+        )
+    """)
     await db.commit()
     return db
 
@@ -230,6 +264,22 @@ async def purge_expired_for_token(db: aiosqlite.Connection, token_hash: str) -> 
     await db.commit()
 
 
+async def check_subscription(db: aiosqlite.Connection, token_hash: str) -> None:
+    """Raise 402 if REQUIRE_SUBSCRIPTION is enabled and token has no active subscription."""
+    if not REQUIRE_SUBSCRIPTION:
+        return
+    async with db.execute(
+        "SELECT active_until FROM subscribers WHERE token_hash = ? AND active_until > ?",
+        (token_hash, now_utc()),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(
+            status_code=402,
+            detail="Active subscription required. Please subscribe in the ClawPulse app.",
+        )
+
+
 async def purge_all_expired(db: aiosqlite.Connection) -> int:
     """Remove all expired rows across all tokens. Returns number of rows deleted."""
     cursor = await db.execute(
@@ -267,6 +317,86 @@ async def check_quota(db: aiosqlite.Connection, token_hash: str, new_payload: st
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.post(
+    "/activate",
+    response_model=StatusResponse,
+    summary="Activate subscription",
+    tags=["Subscription"],
+)
+@limiter.limit("5/minute")
+async def activate_subscription(request: Request, data: ActivateRequest):
+    """
+    Activate or renew a subscription by verifying a StoreKit 2 signed transaction.
+
+    The iOS app should call this endpoint:
+    - After a successful in-app purchase
+    - On every app launch (to refresh `active_until` after renewal)
+
+    **JWS verification steps (server-side):**
+    1. Decode x5c certificate chain from JWS header
+    2. Verify each cert is signed by the next in chain
+    3. Verify chain root traces to Apple Root CA G3
+    4. Verify JWS signature with leaf cert public key
+    5. Verify `appAccountToken` in JWS matches the provided `token` (UUID)
+
+    **Self-hosted instances:** This endpoint is available but `REQUIRE_SUBSCRIPTION=false`
+    means subscription status is never checked on sync endpoints.
+    """
+    # ── Verify JWS ───────────────────────────────────────────────────────────
+    try:
+        payload = await verify_apple_jws(data.jws_transaction)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JWS transaction: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"JWS verification failed: {e}")
+
+    # ── Extract and validate fields ───────────────────────────────────────────
+    app_account_token = payload.get("appAccountToken")
+    if not app_account_token:
+        raise HTTPException(status_code=400, detail="JWS missing appAccountToken — was it set during purchase?")
+
+    if app_account_token.lower() != data.token.lower():
+        raise HTTPException(status_code=400, detail="appAccountToken in JWS does not match provided token.")
+
+    original_transaction_id = payload.get("originalTransactionId")
+    if not original_transaction_id:
+        raise HTTPException(status_code=400, detail="JWS missing originalTransactionId.")
+
+    # expiresDate is Unix timestamp in milliseconds
+    expires_ms = payload.get("expiresDate")
+    if not expires_ms:
+        raise HTTPException(status_code=400, detail="JWS missing expiresDate — is this a subscription product?")
+
+    active_until = datetime.fromtimestamp(expires_ms / 1000, tz=timezone.utc).isoformat()
+    environment = payload.get("environment", "Production")
+
+    # ── Reject Sandbox transactions in Production mode ────────────────────────
+    if APPLE_ENVIRONMENT == "Production" and environment == "Sandbox":
+        raise HTTPException(status_code=400, detail="Sandbox transactions not accepted in Production mode.")
+
+    # ── Upsert subscriber record ──────────────────────────────────────────────
+    token_hash = hash_token(data.token)
+    db = await get_db()
+    try:
+        await db.execute("""
+            INSERT INTO subscribers (token_hash, active_until, original_transaction_id, environment, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(token_hash) DO UPDATE SET
+                active_until = excluded.active_until,
+                original_transaction_id = excluded.original_transaction_id,
+                environment = excluded.environment,
+                updated_at = excluded.updated_at
+        """, (token_hash, active_until, original_transaction_id, environment, now_utc(), now_utc()))
+        await db.commit()
+    finally:
+        await db.close()
+
+    return StatusResponse(
+        status="ok",
+        message=f"Subscription activated. Active until {active_until} ({environment}).",
+    )
+
+
+@app.post(
     "/sync",
     response_model=StatusResponse,
     summary="Upload encrypted payload",
@@ -288,6 +418,7 @@ async def upload_sync(request: Request, data: SyncUpload, x_ttl_hours: str | Non
     token_hash = hash_token(data.token)
     db = await get_db()
     try:
+        await check_subscription(db, token_hash)
         await purge_expired_for_token(db, token_hash)
         await check_quota(db, token_hash, data.payload)
         await db.execute(
