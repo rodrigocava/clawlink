@@ -51,6 +51,39 @@ async def verify_client_secret(x_clawpulse_secret: str = Header(default="")) -> 
     if CLIENT_SECRET and x_clawpulse_secret != CLIENT_SECRET:
         raise HTTPException(status_code=401, detail="Invalid or missing client secret.")
 
+# ── Background cleanup ────────────────────────────────────────────────────────
+
+async def _cleanup_loop() -> None:
+    """Purge expired datapoints every CLEANUP_INTERVAL_SEC. Runs as a background task."""
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SEC)
+        try:
+            db = await get_db()
+            try:
+                deleted = await purge_all_expired(db)
+                if deleted:
+                    print(f"[cleanup] Purged {deleted} expired datapoint(s).", flush=True)
+            finally:
+                await db.close()
+        except Exception as exc:
+            print(f"[cleanup] Error during purge: {exc}", flush=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: ensure DB is initialised + launch background cleanup
+    db = await get_db()
+    await db.close()
+    task = asyncio.create_task(_cleanup_loop())
+    yield
+    # Shutdown: cancel the background task cleanly
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -227,39 +260,8 @@ async def check_quota(db: aiosqlite.Connection, token_hash: str, new_payload: st
         )
 
 
-# ── Background cleanup ────────────────────────────────────────────────────────
-
-async def _cleanup_loop() -> None:
-    """Purge expired datapoints every CLEANUP_INTERVAL_SEC. Runs as a background task."""
-    while True:
-        await asyncio.sleep(CLEANUP_INTERVAL_SEC)
-        try:
-            db = await get_db()
-            try:
-                deleted = await purge_all_expired(db)
-                if deleted:
-                    print(f"[cleanup] Purged {deleted} expired datapoint(s).", flush=True)
-            finally:
-                await db.close()
-        except Exception as exc:
-            print(f"[cleanup] Error during purge: {exc}", flush=True)
-
-
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup: ensure DB is initialised + launch background cleanup
-    db = await get_db()
-    await db.close()
-    task = asyncio.create_task(_cleanup_loop())
-    yield
-    # Shutdown: cancel the background task cleanly
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+# (lifespan + _cleanup_loop defined above, before app instantiation)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
