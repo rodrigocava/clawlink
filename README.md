@@ -75,19 +75,42 @@ make update   # Pull latest + restart
 
 ## Deploy on a server
 
+Two options — pick whichever fits your setup:
+
+### Option A — Clone & compose (includes build step)
+
 ```bash
-# 1. Clone
-git clone https://github.com/rodrigocava/clawlink.git && cd clawlink
-
-# 2. (Optional) configure
-cp .env.example .env && nano .env
-
-# 3. Run
-make run
-
-# 4. Verify
-make test
+git clone https://github.com/rodrigocava/clawlink.git
+cd clawlink
+make run        # builds image locally + starts
+make test       # verify it's healthy
 ```
+
+Update later:
+```bash
+make update     # git pull + rebuild + restart
+```
+
+### Option B — Standalone (no clone, pre-built image from GHCR)
+
+```bash
+# Download just the compose file
+curl -O https://raw.githubusercontent.com/rodrigocava/clawlink/main/docker-compose.ghcr.yml
+
+# Start (pulls ghcr.io/rodrigocava/clawlink:latest automatically)
+docker compose -f docker-compose.ghcr.yml up -d
+
+# Verify
+curl http://localhost:8000/health
+```
+
+Update later:
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+> The GHCR image is built and pushed automatically on every commit to `main` via GitHub Actions. Free for public repos.
 
 Then point a reverse proxy or Cloudflare Tunnel at port 8000.
 

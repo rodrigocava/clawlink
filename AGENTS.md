@@ -12,12 +12,19 @@ ClawLink is a privacy-first encrypted data relay server. Mobile apps post encryp
 - Port 8000 available (or set `PORT` in `.env`)
 - At least 100MB disk space
 
-## Deploy in 3 steps
+## Deploy in 3 steps (Option A — clone + build)
 
 ```bash
 git clone https://github.com/rodrigocava/clawlink.git
 cd clawlink
 make run
+```
+
+## Deploy in 2 steps (Option B — pre-built image, no clone needed)
+
+```bash
+curl -O https://raw.githubusercontent.com/rodrigocava/clawlink/main/docker-compose.ghcr.yml
+docker compose -f docker-compose.ghcr.yml up -d
 ```
 
 That's it. The server is running.
