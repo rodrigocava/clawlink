@@ -1,15 +1,18 @@
-# OpenClaw Sync
+# ClawLink 🦞🔗
 
-Encrypted data relay between the **OpenClaw Companion** iOS app and any OpenClaw instance.
+> Connect your phone's context to your OpenClaw AI agent — privately.
 
-> **Privacy first:** The server stores only encrypted blobs. Plaintext health data never leaves your device.
+ClawLink is an encrypted data relay between the **ClawLink mobile app** (iOS & Android) and any **OpenClaw** instance. Your phone's health, activity, and context data is encrypted before it ever leaves your device.
 
-## How it works
+## Privacy model
 
 ```
-iPhone App  →  encrypts data  →  POST /sync  →  stored as opaque blob
+Mobile App  →  encrypts data client-side  →  POST /sync  →  opaque blob stored
 OpenClaw    →  GET /sync/{token}  →  decrypt locally  →  analyze + act
 ```
+
+The server is **dumb by design** — it stores only encrypted blobs it cannot read.  
+Even with full database access, no personal data is recoverable without your password.
 
 ## API
 
@@ -19,7 +22,7 @@ OpenClaw    →  GET /sync/{token}  →  decrypt locally  →  analyze + act
 | `GET` | `/sync/{token}` | Fetch latest payload |
 | `DELETE` | `/sync/{token}` | Delete payload |
 | `GET` | `/health` | Health check |
-| `GET` | `/docs` | Interactive API docs (Swagger) |
+| `GET` | `/docs` | Interactive API docs (Swagger UI) |
 | `GET` | `/redoc` | API docs (ReDoc) |
 
 ## Running locally
@@ -39,10 +42,6 @@ Open http://localhost:8000/docs
 docker compose up -d
 ```
 
-## Self-hosting
-
-Point your own domain at port 8000 via your reverse proxy of choice (Nginx, Caddy, Cloudflare Tunnel, etc.).
-
 ## Environment variables
 
 | Variable | Default | Description |
@@ -50,6 +49,15 @@ Point your own domain at port 8000 via your reverse proxy of choice (Nginx, Cadd
 | `DATABASE_PATH` | `sync.db` | Path to SQLite database |
 | `DATA_TTL_HOURS` | `48` | Hours before payloads auto-expire |
 | `MAX_PAYLOAD_BYTES` | `10485760` | Max upload size (10MB) |
+
+## Project structure
+
+```
+ClawLink Server  (this repo)   — self-hostable relay, open source (MIT)
+ClawLink iOS     (coming soon) — iPhone app, HealthKit + encryption
+ClawLink Android (roadmap)     — Android app
+ClawLink Skill   (coming soon) — OpenClaw integration (fetch + decrypt + analyze)
+```
 
 ## License
 

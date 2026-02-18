@@ -1,10 +1,12 @@
 """
-OpenClaw Sync Server
+ClawLink Sync Server
 ====================
-Encrypted data relay between the OpenClaw Companion iOS app and any OpenClaw instance.
+Encrypted data relay between the ClawLink mobile app and any OpenClaw instance.
 
 Privacy model: server stores only encrypted blobs. Plaintext never leaves the client.
-All encryption/decryption happens on the edges (iOS app + OpenClaw).
+All encryption/decryption happens on the edges (mobile app + OpenClaw).
+
+GitHub: https://github.com/rodrigocava/clawlink
 """
 
 import hashlib
@@ -30,13 +32,13 @@ MAX_PAYLOAD_BYTES = int(os.getenv("MAX_PAYLOAD_BYTES", str(10 * 1024 * 1024)))  
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
-    title="OpenClaw Sync",
+    title="ClawLink",
     description="""
-Encrypted data relay for the **OpenClaw Companion** iOS app.
+Encrypted data relay for the **ClawLink** mobile app (iOS & Android).
 
 ## How it works
 
-1. The iOS app encrypts your health/context data client-side
+1. The ClawLink app encrypts your phone context data client-side
 2. The encrypted blob is uploaded here (server never sees plaintext)
 3. Your OpenClaw instance fetches the blob and decrypts it locally
 4. Analysis and insights happen entirely on your own infrastructure
@@ -44,16 +46,20 @@ Encrypted data relay for the **OpenClaw Companion** iOS app.
 ## Privacy
 
 The server stores only opaque encrypted blobs keyed by a SHA-256 hash of your token.
-Even with full database access, no health data is recoverable without your password.
+Even with full database access, no personal data is recoverable without your password.
 
 ## Data retention
 
 All payloads expire automatically after **48 hours**.
+
+## Self-hosting
+
+The server is open source. Run your own at: https://github.com/rodrigocava/clawlink
 """,
     version="1.0.0",
     contact={
-        "name": "OpenClaw Community",
-        "url": "https://github.com/openclaw/openclaw-sync",
+        "name": "ClawLink",
+        "url": "https://github.com/rodrigocava/clawlink",
     },
     license_info={"name": "MIT"},
 )
@@ -269,4 +275,4 @@ async def delete_sync(request: Request, token: str):
 )
 async def health_check():
     """Returns 200 OK if the server is running. Use for uptime monitoring."""
-    return StatusResponse(status="ok", message="OpenClaw Sync is running")
+    return StatusResponse(status="ok", message="ClawLink is running")
