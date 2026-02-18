@@ -14,8 +14,8 @@ cd clawlink
 make run
 ```
 
-Server starts on **http://localhost:8000**  
-API docs at **http://localhost:8000/docs**
+Server starts on **http://localhost:6413**  
+API docs at **http://localhost:6413/docs**
 
 > **AI agent?** Read [AGENTS.md](./AGENTS.md) for concise deploy + operate instructions.
 
@@ -54,7 +54,7 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8000` | Port to expose |
+| `PORT` | `6413` | Port to expose |
 | `DATA_TTL_HOURS` | `48` | Hours before payloads auto-expire |
 | `MAX_PAYLOAD_BYTES` | `10485760` | Max upload size (10MB) |
 
@@ -101,7 +101,7 @@ curl -O https://raw.githubusercontent.com/rodrigocava/clawlink/main/docker-compo
 docker compose -f docker-compose.ghcr.yml up -d
 
 # Verify
-curl http://localhost:8000/health
+curl http://localhost:6413/health
 ```
 
 Update later:
@@ -112,7 +112,7 @@ docker compose -f docker-compose.ghcr.yml up -d
 
 > The GHCR image is built and pushed automatically on every commit to `main` via GitHub Actions. Free for public repos.
 
-Then point a reverse proxy or Cloudflare Tunnel at port 8000.
+Then point a reverse proxy or Cloudflare Tunnel at port 6413.
 
 ---
 

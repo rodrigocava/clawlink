@@ -3,13 +3,13 @@
 ## Start the server (production, detached)
 run:
 	docker compose up -d --build
-	@echo "✅ ClawLink running on http://localhost:$${PORT:-8000}"
-	@echo "📖 API docs: http://localhost:$${PORT:-8000}/docs"
+	@echo "✅ ClawLink running on http://localhost:$${PORT:-6413}"
+	@echo "📖 API docs: http://localhost:$${PORT:-6413}/docs"
 
 ## Start for local development (auto-reload)
 dev:
 	pip install -r requirements.txt
-	uvicorn main:app --reload --port $${PORT:-8000}
+	uvicorn main:app --reload --port $${PORT:-6413}
 
 ## Stop the server
 stop:
@@ -21,7 +21,7 @@ logs:
 
 ## Check server health
 test:
-	@curl -sf http://localhost:$${PORT:-8000}/health && echo "✅ ClawLink is healthy" || echo "❌ ClawLink is not responding"
+	@curl -sf http://localhost:$${PORT:-6413}/health && echo "✅ ClawLink is healthy" || echo "❌ ClawLink is not responding"
 
 ## Pull latest and restart
 update:

@@ -9,7 +9,7 @@ ClawLink is a privacy-first encrypted data relay server. Mobile apps post encryp
 ## Requirements
 
 - Docker + Docker Compose (v2+)
-- Port 8000 available (or set `PORT` in `.env`)
+- Port 6413 available (or set `PORT` in `.env`)
 - At least 100MB disk space
 
 ## Deploy in 3 steps (Option A — clone + build)
@@ -35,7 +35,7 @@ That's it. The server is running.
 make test
 # Expected: ✅ ClawLink is healthy
 
-curl http://localhost:8000/health
+curl http://localhost:6413/health
 # Expected: {"status":"ok","message":"ClawLink is running"}
 ```
 
@@ -48,7 +48,7 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8000` | Port to expose |
+| `PORT` | `6413` | Port to expose |
 | `DATA_DIR` | `./data` | Host path for SQLite database |
 | `DATA_TTL_HOURS` | `48` | Hours before payloads auto-expire |
 | `MAX_PAYLOAD_BYTES` | `10485760` | Max upload size (10MB) |
@@ -56,19 +56,19 @@ cp .env.example .env
 ### cava.industries example `.env`
 
 ```env
-PORT=8000
+PORT=6413
 DATA_DIR=/srv/dev-disk-by-uuid-649a14d8-043c-4d63-9959-64d1bf74963b/docker_data/Config/clawlink
 DATA_TTL_HOURS=48
 ```
 
 ## API reference
 
-Full interactive docs at: `http://localhost:8000/docs`
+Full interactive docs at: `http://localhost:6413/docs`
 
 ### Quick reference
 
 ```bash
-BASE="http://localhost:8000"
+BASE="http://localhost:6413"
 TOKEN="your-secret-token"
 
 # Upload encrypted payload

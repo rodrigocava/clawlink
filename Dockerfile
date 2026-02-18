@@ -11,6 +11,6 @@ COPY main.py .
 VOLUME ["/app/data"]
 ENV DATABASE_PATH=/app/data/sync.db
 
-EXPOSE 8000
+EXPOSE 6413
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "6413"]
