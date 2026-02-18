@@ -127,6 +127,12 @@ class SyncResponse(BaseModel):
     datapoints: List[Datapoint]
 
 
+class CountResponse(BaseModel):
+    count: int
+    oldest: str | None
+    newest: str | None
+
+
 class StatusResponse(BaseModel):
     status: str
     message: str
@@ -285,6 +291,37 @@ async def fetch_sync(request: Request, token: str):
             for row in rows
         ],
     )
+
+
+@app.get(
+    "/sync/{token}/count",
+    response_model=CountResponse,
+    summary="Count datapoints for a token",
+    tags=["Sync"],
+    dependencies=[Depends(verify_client_secret)],
+)
+@limiter.limit("30/minute")
+async def count_sync(request: Request, token: str):
+    """
+    Returns the number of non-expired datapoints stored for a token,
+    plus the oldest and newest timestamps. Useful for the app dashboard.
+    No payload data is returned.
+    """
+    token_hash = hash_token(token)
+    db = await get_db()
+    try:
+        await purge_expired_for_token(db, token_hash)
+        async with db.execute(
+            "SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM sync_data "
+            "WHERE token_hash = ? AND expires_at > ?",
+            (token_hash, now_utc()),
+        ) as cursor:
+            row = await cursor.fetchone()
+    finally:
+        await db.close()
+
+    count, oldest, newest = row if row else (0, None, None)
+    return CountResponse(count=count, oldest=oldest, newest=newest)
 
 
 @app.delete(
