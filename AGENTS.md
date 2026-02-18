@@ -49,8 +49,17 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8000` | Port to expose |
+| `DATA_DIR` | `./data` | Host path for SQLite database |
 | `DATA_TTL_HOURS` | `48` | Hours before payloads auto-expire |
 | `MAX_PAYLOAD_BYTES` | `10485760` | Max upload size (10MB) |
+
+### cava.industries example `.env`
+
+```env
+PORT=8000
+DATA_DIR=/srv/dev-disk-by-uuid-649a14d8-043c-4d63-9959-64d1bf74963b/docker_data/Config/clawlink
+DATA_TTL_HOURS=48
+```
 
 ## API reference
 

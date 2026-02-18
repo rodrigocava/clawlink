@@ -5,7 +5,7 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     volumes:
-      - ./data:/app/data
+      - ${DATA_DIR:-./data}:/app/data
     environment:
       - DATABASE_PATH=/app/data/sync.db
       - DATA_TTL_HOURS=${DATA_TTL_HOURS:-48}
