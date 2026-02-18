@@ -166,17 +166,6 @@ Schema is **versioned and evolvable** — new fields and modules are additive an
 
 ---
 
-## Self-host vs hosted
-
-| | Self-host | Hosted (cava.industries) |
-|--|-----------|--------------------------|
-| Cost | Free | ~$12-20/year |
-| Setup | ~5 min with Docker | Zero config |
-| Privacy | Your server, your rules | Encrypted blobs only — we can't read your data |
-| Control | Full | Standard |
-
----
-
 ## License
 
 MIT — fork it, self-host it, build on it.

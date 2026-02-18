@@ -53,11 +53,11 @@ cp .env.example .env
 | `DATA_TTL_HOURS` | `48` | Hours before payloads auto-expire |
 | `MAX_PAYLOAD_BYTES` | `10485760` | Max upload size (10MB) |
 
-### cava.industries example `.env`
+### Example `.env` with custom data path
 
 ```env
 PORT=6413
-DATA_DIR=/srv/dev-disk-by-uuid-649a14d8-043c-4d63-9959-64d1bf74963b/docker_data/Config/clawpulse
+DATA_DIR=/srv/your-data-disk/clawpulse
 DATA_TTL_HOURS=48
 ```
 
