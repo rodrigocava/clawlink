@@ -9,8 +9,10 @@ All encryption/decryption happens on the edges (mobile app + OpenClaw).
 GitHub: https://github.com/rodrigocava/clawpulse
 """
 
+import asyncio
 import hashlib
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -29,6 +31,7 @@ DATA_TTL_HOURS       = int(os.getenv("DATA_TTL_HOURS", "48"))
 MAX_PAYLOAD_BYTES    = int(os.getenv("MAX_PAYLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
 MAX_TOKEN_QUOTA_BYTES = int(os.getenv("MAX_TOKEN_QUOTA_BYTES", str(5 * 1024 * 1024)))  # 5 MB total per token
 CLIENT_SECRET        = os.getenv("CLIENT_SECRET", "")  # Empty = dev mode (no auth)
+CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_SEC", str(60 * 60)))  # 1 hour
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 
@@ -51,6 +54,7 @@ async def verify_client_secret(x_clawpulse_secret: str = Header(default="")) -> 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
+    lifespan=lifespan,
     title="ClawPulse",
     description="""
 Encrypted data relay for the **ClawPulse** mobile app (iOS & Android).
@@ -78,7 +82,7 @@ Expired rows are purged on every write, read, and via the `/cleanup` endpoint.
 
 The server is open source. Run your own at: https://github.com/rodrigocava/clawpulse
 """,
-    version="2.1.0",
+    version="2.2.0",
     contact={
         "name": "ClawPulse",
         "url": "https://github.com/rodrigocava/clawpulse",
@@ -223,12 +227,39 @@ async def check_quota(db: aiosqlite.Connection, token_hash: str, new_payload: st
         )
 
 
+# ── Background cleanup ────────────────────────────────────────────────────────
+
+async def _cleanup_loop() -> None:
+    """Purge expired datapoints every CLEANUP_INTERVAL_SEC. Runs as a background task."""
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SEC)
+        try:
+            db = await get_db()
+            try:
+                deleted = await purge_all_expired(db)
+                if deleted:
+                    print(f"[cleanup] Purged {deleted} expired datapoint(s).", flush=True)
+            finally:
+                await db.close()
+        except Exception as exc:
+            print(f"[cleanup] Error during purge: {exc}", flush=True)
+
+
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-@app.on_event("startup")
-async def startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: ensure DB is initialised + launch background cleanup
     db = await get_db()
     await db.close()
+    task = asyncio.create_task(_cleanup_loop())
+    yield
+    # Shutdown: cancel the background task cleanly
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -369,27 +400,6 @@ async def delete_sync(request: Request, token: str):
         raise HTTPException(status_code=404, detail="No data found for this token.")
 
     return StatusResponse(status="ok", message=f"Deleted {deleted} datapoint(s).")
-
-
-@app.get(
-    "/cleanup",
-    response_model=StatusResponse,
-    summary="Purge all expired datapoints",
-    tags=["System"],
-)
-async def cleanup():
-    """
-    Purge all expired datapoints across all tokens.
-    Safe to call via cron — returns number of rows deleted.
-    No auth required (deletes only expired data, exposes nothing).
-    """
-    db = await get_db()
-    try:
-        deleted = await purge_all_expired(db)
-    finally:
-        await db.close()
-
-    return StatusResponse(status="ok", message=f"Purged {deleted} expired datapoint(s).")
 
 
 @app.get(
