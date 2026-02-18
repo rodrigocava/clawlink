@@ -1,0 +1,12 @@
+services:
+  openclaw-sync:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/sync.db
+      - DATA_TTL_HOURS=48
+      - MAX_PAYLOAD_BYTES=10485760  # 10MB
